@@ -1,13 +1,15 @@
-import site
+from datetime import datetime
+from io import BytesIO
 from pathlib import Path
-
+from textwrap import dedent
 import black
 import markdown
+from fastapi.staticfiles import StaticFiles
+from xhtml2pdf import pisa
+
 from open_webui.config import DATA_DIR, ENABLE_ADMIN_EXPORT
-from open_webui.env import FONTS_DIR
 from open_webui.constants import ERROR_MESSAGES
 from fastapi import APIRouter, Depends, HTTPException, Response, status
-from fpdf import FPDF
 from pydantic import BaseModel
 from starlette.responses import FileResponse
 from open_webui.utils.misc import get_gravatar_url
@@ -58,53 +60,78 @@ class ChatForm(BaseModel):
 async def download_chat_as_pdf(
     form_data: ChatForm,
 ):
-    global FONTS_DIR
-
-    pdf = FPDF()
-    pdf.add_page()
-
-    # When running using `pip install` the static directory is in the site packages.
-    if not FONTS_DIR.exists():
-        FONTS_DIR = Path(site.getsitepackages()[0]) / "static/fonts"
-    # When running using `pip install -e .` the static directory is in the site packages.
-    # This path only works if `open-webui serve` is run from the root of this project.
-    if not FONTS_DIR.exists():
-        FONTS_DIR = Path("./backend/static/fonts")
-
-    pdf.add_font("NotoSans", "", f"{FONTS_DIR}/NotoSans-Regular.ttf")
-    pdf.add_font("NotoSans", "b", f"{FONTS_DIR}/NotoSans-Bold.ttf")
-    pdf.add_font("NotoSans", "i", f"{FONTS_DIR}/NotoSans-Italic.ttf")
-    pdf.add_font("NotoSansKR", "", f"{FONTS_DIR}/NotoSansKR-Regular.ttf")
-    pdf.add_font("NotoSansJP", "", f"{FONTS_DIR}/NotoSansJP-Regular.ttf")
-    pdf.add_font("NotoSansSC", "", f"{FONTS_DIR}/NotoSansSC-Regular.ttf")
-
-    pdf.set_font("NotoSans", size=12)
-    pdf.set_fallback_fonts(["NotoSansKR", "NotoSansJP", "NotoSansSC"])
-
-    pdf.set_auto_page_break(auto=True, margin=15)
-
-    # Adjust the effective page width for multi_cell
-    effective_page_width = (
-        pdf.w - 2 * pdf.l_margin - 10
-    )  # Subtracted an additional 10 for extra padding
+    html_messages = '<div>'
 
     # Add chat messages
     for message in form_data.messages:
         role = message["role"]
         content = message["content"]
-        pdf.set_font("NotoSans", "B", size=14)  # Bold for the role
-        pdf.multi_cell(effective_page_width, 10, f"{role.upper()}", 0, "L")
-        pdf.ln(1)  # Extra space between messages
 
-        pdf.set_font("NotoSans", size=10)  # Regular for content
-        pdf.multi_cell(effective_page_width, 6, content, 0, "L")
-        pdf.ln(1.5)  # Extra space between messages
+        if message.get('timestamp',None):
+            date_time = datetime.fromtimestamp(message['timestamp'])
+            date_str = date_time.strftime("%Y-%m-%d, %H:%M:%S")
+        else:
+            date_str = ''
 
-    # Save the pdf with name .pdf
-    pdf_bytes = pdf.output()
+        model = message['model'] if role == 'assistant' else ''
+        html_content = markdown.markdown(
+            content, extensions=['pymdownx.extra']
+        )
+        html_message = f"""
+                <div class="message">
+                    <small>{date_str}</small>
+                    <div>
+                      <h2>
+                        <strong>{role.title()}</strong>
+                        <small class="text-muted">{model}</small>
+                      </h2>
+                    </div>
+                    
+                    <div class="markdown-section">
+                        {html_content}
+                    </div>
+                </div>
+            """
+
+        html_messages += html_message
+
+    html_messages += "</div>"
+
+    css_style_file = Path("./backend/open_webui/static/assets/pdf-style.css")
+
+    html_body = dedent(
+        f"""
+            <html>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <link rel="stylesheet" href="{css_style_file}">
+                <body>
+                    <div class="container"> 
+                        <div class="text-center">
+                            <h1> 
+                                {form_data.title}
+                            </h1>
+                        </div>
+                        <div>
+                            {html_messages}
+                        </div>
+                    </div>
+                </body>
+            </html>
+        """
+    )
+
+
+    pdf_buffer = BytesIO()
+    pisa_status = pisa.CreatePDF(html_body, dest=pdf_buffer)
+
+    if pisa_status.err:
+        return Response(content="Error generating PDF", status_code=500)
+
+    pdf_bytes = pdf_buffer.getvalue()
 
     return Response(
-        content=bytes(pdf_bytes),
+        content=pdf_bytes,
         media_type="application/pdf",
         headers={"Content-Disposition": "attachment;filename=chat.pdf"},
     )
