@@ -1,14 +1,16 @@
+import logging
 from datetime import datetime
-from io import BytesIO
 from pathlib import Path
 from typing import Dict, Any, List
 
 from markdown import markdown
+import pdfkit
 from starlette.responses import Response
-from xhtml2pdf import pisa
 
 from open_webui.apps.webui.models.chats import ChatTitleMessagesForm
+from open_webui.utils.tools import log
 
+log = logging.getLogger(__name__)
 
 class PDFGenerator:
     """
@@ -17,9 +19,7 @@ class PDFGenerator:
     The process involves transforming markdown content into HTML and then into a PDF format,
     which can be easily returned as a response to the routes.
 
-    It depends on xhtml2pdf for converting HTML to PDF (more details at https://github.com/xhtml2pdf/xhtml2pdf).
-    I found xhtml2pdf issues when rendering list html tag, see https://github.com/xhtml2pdf/xhtml2pdf/issues/550
-    and https://github.com/xhtml2pdf/xhtml2pdf/issues/756.
+    It depends on pdfkit for converting HTML to PDF that uses wkhtmltopdf binary package.
 
     Attributes:
     - `form_data`: An instance of `ChatTitleMessagesForm` containing title and messages.
@@ -48,28 +48,31 @@ class PDFGenerator:
 
         html_message = f"""
               <div class="message">
-                  <small> {date_str} </small>
-                  <div>
-                      <h2>
-                          <strong>{role.title()}</strong>
-                          <small class="text-muted">{model}</small>
-                      </h2>
-                  </div>
-                  <div class="markdown-section">
-                      {html_content}
-                  </div>
-              </div>
+                    <div class="mb-2 mt-4">
+                        <div class="d-flex justify-content-between align-items-center">
+                            <div>
+                              <h2 class="mb-0">
+                                <strong>{role.title()}</strong>
+                                <small class="text-muted">{model}</small>
+                                 <div>
+                                    <small class="heading-date">{date_str}</small>
+                                </div>
+                              </h2>
+                            </div>
+                        </div>  
+                    </div>
+                    
+                    <div class="markdown-section">
+                        {html_content}
+                    </div>
+                </div>
           """
         return html_message
 
     def create_pdf_from_html(self) -> bytes:
         """Convert HTML content to PDF and return the bytes."""
-        pdf_buffer = BytesIO()
-        pisa_status = pisa.CreatePDF(src=self.html_body, dest=pdf_buffer)
-        if pisa_status.err:
-            raise RuntimeError("Error generating PDF")
+        return pdfkit.from_string(self.html_body, output_path=False, css=self.css_style_file)
 
-        return pdf_buffer.getvalue()
 
     def format_timestamp(self, timestamp: float) -> str:
         """Convert a UNIX timestamp to a formatted date string."""
@@ -105,10 +108,12 @@ class PDFGenerator:
                 headers={"Content-Disposition": "attachment;filename=chat.pdf"},
             )
         except RuntimeError as pdf_error:
+            log.error(pdf_error)
             # Handle PDF generation errors
             return Response(content=str(pdf_error), status_code=500)
         except Exception as e:
             # Handle other unexpected errors
+            log.error(e)
             return Response(content="An unexpected error occurred.", status_code=500)
 
     def generate_html_body(self) -> str:
@@ -118,7 +123,6 @@ class PDFGenerator:
             <head>
                 <meta charset="UTF-8">
                 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-                <link rel="stylesheet" href="{self.css_style_file.as_posix()}">
             </head>
             <body>
                 <div class="container"> 
